@@ -1,0 +1,523 @@
+openapi: 3.1.0
+info:
+  title: KavoHub Orders API
+  version: 0.3.0
+  description: >-
+    Contract-first REST API for the Orders module. Orders owns orders, order
+    lines, pricing snapshots, and discount approvals. Inventory owns stock and
+    reservations; Billing owns invoices and payments. Send
+    X-Correlation-Id on every request; Orders generates one when absent and
+    returns it in the response. POST commands require Idempotency-Key. Reuse
+    with the same body replays the saved result; reuse with a different body
+    returns 422 idempotency-key-reuse; an in-progress command returns 409
+    request-in-progress. Compatible changes add optional fields or operations;
+    removing/renaming fields, changing types or meaning, or tightening required
+    fields requires a new major contract version and consumer agreement.
+    Consumers use a Prism mock generated from this contract during development.
+servers:
+  - url: http://localhost:8102/api/v1
+    description: Local learning environment
+security:
+  - bearerAuth: []
+tags:
+  - name: Orders
+  - name: Approvals
+  - name: Reports
+paths:
+  /orders:
+    post:
+      tags: [Orders]
+      operationId: createOrder
+      summary: Create a draft order
+      x-required-roles: [sales_manager, sales_head]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+      responses:
+        '201':
+          description: Draft created (or the original result replayed for this key)
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          description: NBU unavailable and no cached rate exists for the requested date
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        default:
+          $ref: '#/components/responses/Problem'
+
+  /orders/{orderId}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Get an order by ID
+      x-required-roles: [sales_manager, sales_head, warehouse_operator, accountant, director, admin, svc-billing]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Order found
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Problem'
+    patch:
+      tags: [Orders]
+      operationId: updateDraftOrder
+      summary: Update a draft order using optimistic concurrency
+      x-required-roles: [sales_manager, sales_head]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOrderRequest'
+      responses:
+        '200':
+          description: Draft updated
+          headers:
+            ETag:
+              schema: { type: string }
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          description: NBU unavailable and no cached rate exists for the requested date
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        default:
+          $ref: '#/components/responses/Problem'
+
+  /orders/{orderId}/submit-approval:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Approvals]
+      operationId: submitDiscountApproval
+      summary: Submit a discount above 10 percent for approval
+      description: >-
+        Locks the submitted order version. The manager cannot edit the discount
+        while approval is pending; if the approval is rejected, a new order
+        version is submitted. If approval is pending, Inventory reserves the
+        complete order for at most 24 hours. This explicit command and the
+        automatic approval path from confirm converge on the same transition;
+        they cannot create duplicate approval requests.
+      x-required-roles: [sales_manager]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '202':
+          description: Approval request accepted
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        default:
+          $ref: '#/components/responses/Problem'
+
+  /orders/{orderId}/approve:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Approvals]
+      operationId: approveDiscount
+      summary: Approve a pending discount
+      x-required-roles: [sales_head, director]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionRequest'
+      responses:
+        '202':
+          description: Approval recorded; order confirmation/reservation continues
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        default:
+          $ref: '#/components/responses/Problem'
+
+  /orders/{orderId}/reject:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Approvals]
+      operationId: rejectDiscount
+      summary: Reject a pending discount
+      x-required-roles: [sales_head, director]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectApprovalRequest'
+      responses:
+        '200':
+          description: Approval rejected; any temporary reservation is released
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        default:
+          $ref: '#/components/responses/Problem'
+
+  /orders/{orderId}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Orders]
+      operationId: confirmOrder
+      summary: Confirm an order or start discount approval
+      description: >-
+        A discount above 10 percent enters pending_approval and returns 202.
+        Otherwise Orders requests an atomic full reservation from Inventory.
+        The command uses the existing reservation after approval, if one was
+        created for the approval window. When approval is required, this command
+        starts the same approval transition as submit-approval.
+      x-required-roles: [sales_manager, sales_head]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Confirmation completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '202':
+          description: Approval or reservation workflow accepted and still in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        default:
+          $ref: '#/components/responses/Problem'
+
+  /orders/{orderId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Orders]
+      operationId: cancelOrder
+      summary: Cancel an order where the lifecycle permits cancellation
+      x-required-roles: [sales_manager, sales_head]
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelOrderRequest'
+      responses:
+        '202':
+          description: Cancellation accepted; release of an active reservation is still in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '200':
+          description: Order cancelled; reservation release is initiated if needed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        default:
+          $ref: '#/components/responses/Problem'
+
+  /reports/orders:
+    get:
+      tags: [Reports]
+      operationId: getOrdersReport
+      summary: Get an operational order report for a date range
+      x-required-roles: [sales_head, director, accountant]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Order summary for the requested period
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrdersReport'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        default:
+          $ref: '#/components/responses/Problem'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak OIDC access token for realm kavohub
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^ORD-[0-9]{4}-[0-9]{6}$'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: UUID identifying this logical command; retain the key for retries.
+      schema: { type: string, format: uuid }
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      schema: { type: string, format: uuid }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: ETag/version last read by the client.
+      schema: { type: string, pattern: '^"[0-9]+"$' }
+  headers:
+    CorrelationId:
+      description: Correlation identifier for the business operation
+      schema: { type: string, format: uuid }
+  responses:
+    Problem:
+      description: Problem Details response
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Order not found
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Invalid lifecycle transition, stale version, or command in progress
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unprocessable:
+      description: Validation failure or idempotency key reused with a different body
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    CreateOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [accountId, warehouse, currency, lines]
+      properties:
+        accountId: { type: string, pattern: '^ACC-[0-9]{6}$' }
+        warehouse: { type: string, enum: [KYIV, LVIV] }
+        currency: { type: string, enum: [UAH, EUR] }
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/OrderLineInput' }
+    UpdateOrderRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        warehouse: { type: string, enum: [KYIV, LVIV] }
+        currency: { type: string, enum: [UAH, EUR] }
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/OrderLineInput' }
+    OrderLineInput:
+      type: object
+      additionalProperties: false
+      required: [productId, quantity, unitPrice, discountPercent]
+      properties:
+        productId: { type: string, format: uuid }
+        quantity: { type: number, exclusiveMinimum: 0 }
+        unitPrice: { type: number, minimum: 0 }
+        discountPercent: { type: number, minimum: 0, maximum: 100 }
+    ApprovalDecisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        comment: { type: string, maxLength: 1000 }
+    RejectApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+    CancelOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+    Order:
+      type: object
+      required: [orderId, accountId, status, approvalStatus, reservationStatus, currency, lines, version]
+      properties:
+        orderId: { type: string, pattern: '^ORD-[0-9]{4}-[0-9]{6}$' }
+        accountId: { type: string, pattern: '^ACC-[0-9]{6}$' }
+        warehouse: { type: string, enum: [KYIV, LVIV] }
+        status:
+          type: string
+          enum: [draft, pending_approval, on_hold, confirmed, reserved, cancelled, shipped, invoiced, paid, closed]
+        approvalStatus: { type: string, enum: [not_required, pending, approved, rejected] }
+        reservationStatus: { type: string, enum: [not_requested, pending, on_hold, reserved, expired, released, failed] }
+        cancellationStatus: { type: string, enum: [not_requested, pending, completed] }
+        currency: { type: string, enum: [UAH, EUR] }
+        exchangeRate: { type: number, exclusiveMinimum: 0 }
+        rateRequestedDate: { type: string, format: date }
+        rateDate: { type: string, format: date }
+        rateSource: { type: string }
+        validUntil: { type: string, format: date }
+        lines:
+          type: array
+          items: { $ref: '#/components/schemas/OrderLine' }
+        reservationId: { type: string }
+        reservedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        version: { type: integer, minimum: 1 }
+        updatedAt: { type: string, format: date-time }
+    OrderLine:
+      type: object
+      required: [productId, sku, quantity, unitPrice, discountPercent]
+      properties:
+        productId: { type: string, format: uuid }
+        sku: { type: string }
+        quantity: { type: number, exclusiveMinimum: 0 }
+        sourceUnitPrice:
+          type: number
+          minimum: 0
+          description: Original price before currency conversion, when applicable.
+        sourceCurrency:
+          type: string
+          enum: [UAH, EUR]
+          description: Currency of sourceUnitPrice; for EUR equipment this preserves the NBU conversion basis.
+        unitPrice: { type: number, minimum: 0 }
+        discountPercent: { type: number, minimum: 0, maximum: 100 }
+        lineTotal: { type: number, minimum: 0 }
+    OrdersReport:
+      type: object
+      required: [from, to, orderCount, totalsByCurrency, countsByStatus]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        orderCount: { type: integer, minimum: 0 }
+        totalsByCurrency:
+          type: array
+          items:
+            type: object
+            required: [currency, amount]
+            properties:
+              currency: { type: string, enum: [UAH, EUR] }
+              amount: { type: number }
+        countsByStatus:
+          type: object
+          additionalProperties: { type: integer, minimum: 0 }
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: >-
+            Stable problem identifiers include validation-error,
+            invalid-state-transition, concurrency-conflict,
+            idempotency-key-reuse, request-in-progress,
+            exchange-rate-unavailable, and exchange-rate-not-available-for-date.
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string }
+        correlationId: { type: string, format: uuid }

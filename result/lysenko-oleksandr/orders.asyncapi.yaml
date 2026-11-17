@@ -1,0 +1,160 @@
+asyncapi: 3.0.0
+info:
+  title: KavoHub Orders Events
+  version: 0.3.0
+  description: >-
+    Events published by Orders to the durable topic exchange kavohub.events.
+    The envelope follows the project's CloudEvents-inspired format. Consumers
+    deduplicate by envelope id and propagate correlationId. Compatible changes
+    add optional payload fields; removing/renaming fields, changing types or
+    meanings, or adding required fields requires a new major contract version
+    and agreement with Inventory, CRM, and Billing. Consumers can use event
+    fixtures or a mock publisher generated from this contract during
+    development.
+defaultContentType: application/json
+servers:
+  localRabbitMq:
+    host: localhost:5672
+    protocol: amqp
+    description: Local RabbitMQ learning environment
+channels:
+  orderConfirmed:
+    address: orders.order.confirmed
+    messages:
+      OrderConfirmed:
+        $ref: '#/components/messages/OrderConfirmed'
+  orderCancelled:
+    address: orders.order.cancelled
+    messages:
+      OrderCancelled:
+        $ref: '#/components/messages/OrderCancelled'
+operations:
+  publishOrderConfirmed:
+    action: send
+    channel:
+      $ref: '#/channels/orderConfirmed'
+    messages:
+      - $ref: '#/channels/orderConfirmed/messages/OrderConfirmed'
+  publishOrderCancelled:
+    action: send
+    channel:
+      $ref: '#/channels/orderCancelled'
+    messages:
+      - $ref: '#/channels/orderCancelled/messages/OrderCancelled'
+components:
+  messages:
+    OrderConfirmed:
+      name: OrderConfirmed
+      title: Order confirmed
+      summary: Order is confirmed and ready for Inventory processing.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/OrderConfirmedEnvelope'
+    OrderCancelled:
+      name: OrderCancelled
+      title: Order cancelled
+      summary: Order was cancelled and any active reservation must be released.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/OrderCancelledEnvelope'
+  schemas:
+    EventBase:
+      type: object
+      required: [specversion, id, type, source, time, correlationId, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          const: '1.0'
+        id:
+          type: string
+          format: uuid
+          description: Unique message ID used by consumers for deduplication.
+        type:
+          type: string
+        source:
+          type: string
+          const: kavohub/orders
+        time:
+          type: string
+          format: date-time
+        correlationId:
+          type: string
+          format: uuid
+        dataschema:
+          type: string
+          format: uri-reference
+        data:
+          type: object
+    OrderConfirmedEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EventBase'
+        - type: object
+          properties:
+            type:
+              const: orders.order.confirmed
+            data:
+              $ref: '#/components/schemas/OrderConfirmedData'
+    OrderCancelledEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EventBase'
+        - type: object
+          properties:
+            type:
+              const: orders.order.cancelled
+            data:
+              $ref: '#/components/schemas/OrderCancelledData'
+    OrderConfirmedData:
+      type: object
+      required: [orderId, accountId, warehouse, orderVersion, lines]
+      properties:
+        orderId:
+          type: string
+          pattern: '^ORD-[0-9]{4}-[0-9]{6}$'
+        accountId:
+          type: string
+          pattern: '^ACC-[0-9]{6}$'
+        warehouse:
+          type: string
+          enum: [KYIV, LVIV]
+        orderVersion:
+          type: integer
+          minimum: 1
+          description: Monotonically increasing version within this order.
+        reservationId:
+          type: string
+          description: Existing reservation ID, when reservation was made during approval.
+        lines:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [sku, qty]
+            properties:
+              sku:
+                type: string
+              qty:
+                type: number
+                exclusiveMinimum: 0
+    OrderCancelledData:
+      type: object
+      required: [orderId, accountId, orderVersion, reason]
+      properties:
+        orderId:
+          type: string
+          pattern: '^ORD-[0-9]{4}-[0-9]{6}$'
+        accountId:
+          type: string
+          pattern: '^ACC-[0-9]{6}$'
+        orderVersion:
+          type: integer
+          minimum: 1
+          description: Monotonically increasing version within this order.
+        reservationId:
+          type: string
+          description: Reservation to release, if known.
+        reason:
+          type: string
+          minLength: 1
+        cancelledAt:
+          type: string
+          format: date-time
