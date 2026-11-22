@@ -1,0 +1,95 @@
+asyncapi: 3.0.0
+info:
+  title: Kavohub Orders Events
+  version: 1.0.0
+  description: Orders published events in the project envelope.
+defaultContentType: application/json
+servers:
+  rabbit:
+    host: rabbitmq.kavohub.local:5672
+    protocol: amqp
+    pathname: /
+channels:
+  orderConfirmed:
+    address: orders.order.confirmed
+    messages:
+      OrderConfirmed:
+        $ref: '#/components/messages/OrderConfirmed'
+  orderCancelled:
+    address: orders.order.cancelled
+    messages:
+      OrderCancelled:
+        $ref: '#/components/messages/OrderCancelled'
+operations:
+  publishOrderConfirmed:
+    action: send
+    channel: {$ref: '#/channels/orderConfirmed'}
+    messages:
+      - {$ref: '#/channels/orderConfirmed/messages/OrderConfirmed'}
+  publishOrderCancelled:
+    action: send
+    channel: {$ref: '#/channels/orderCancelled'}
+    messages:
+      - {$ref: '#/channels/orderCancelled/messages/OrderCancelled'}
+components:
+  messages:
+    OrderConfirmed:
+      name: OrderConfirmed
+      title: Confirmed order
+      contentType: application/json
+      payload: {$ref: '#/components/schemas/OrderConfirmedEnvelope'}
+    OrderCancelled:
+      name: OrderCancelled
+      title: Cancelled order
+      contentType: application/json
+      payload: {$ref: '#/components/schemas/OrderCancelledEnvelope'}
+  schemas:
+    BaseEnvelope:
+      type: object
+      required: [specversion, id, type, source, time, correlationId, dataschema, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string, format: uuid}
+        type: {type: string}
+        source: {type: string}
+        time: {type: string, format: date-time}
+        correlationId: {type: string, format: uuid}
+        dataschema: {type: string}
+    OrderConfirmedEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/BaseEnvelope'}
+        - type: object
+          properties:
+            type: {const: orders.order.confirmed}
+            data:
+              type: object
+              required: [orderId, accountId, warehouse, reservationId, lines, confirmedAt]
+              properties:
+                orderId: {type: string, pattern: '^ORD-[0-9]{4}-[0-9]{6}$'}
+                accountId: {type: string}
+                warehouse: {type: string, enum: [KYIV, LVIV]}
+                reservationId: {type: string}
+                lines:
+                  type: array
+                  items:
+                    type: object
+                    required: [sku, qty]
+                    properties:
+                      sku: {type: string}
+                      qty: {type: string}
+                confirmedAt: {type: string, format: date-time}
+    OrderCancelledEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/BaseEnvelope'}
+        - type: object
+          properties:
+            type: {const: orders.order.cancelled}
+            data:
+              type: object
+              required: [orderId, reason, cancelledAt]
+              properties:
+                orderId: {type: string, pattern: '^ORD-[0-9]{4}-[0-9]{6}$'}
+                reservationId: {type: [string, 'null']}
+                reason: {type: string}
+                cancelledAt: {type: string, format: date-time}
+
