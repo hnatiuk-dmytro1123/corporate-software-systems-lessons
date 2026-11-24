@@ -1,0 +1,342 @@
+asyncapi: 3.0.0
+info:
+  title: KavoHub Billing Events
+  version: 0.1.0
+  description: >-
+    Contract-first draft based on the README event envelope and Billing decisions in lab-02.
+    Billing publishes through a transactional outbox with at-least-once delivery. Consumers
+    deduplicate by envelope id. billing.invoice.payment_status_changed and
+    billing.credit_note.issued are proposals pending confirmation by Orders. Invoice state
+    events carry a monotonically increasing invoiceVersion because order across different
+    event types is not guaranteed.
+x-contract-governance:
+  versioning: >-
+    Adding optional payload fields is compatible. Removing/renaming a field, changing its type,
+    changing requiredness or event meaning is breaking; publish a separately versioned event
+    type/schema and coordinate consumer migration.
+  delivery: >-
+    Transactional outbox; at-least-once publish. Re-publication retains the same envelope id.
+    Consumers commit inbox deduplication and business changes before acknowledging delivery.
+  consumerMock: Consumers can inspect and mock these messages in AsyncAPI Studio before implementation.
+defaultContentType: application/json
+servers:
+  local:
+    host: localhost:5672
+    protocol: amqp
+    protocolVersion: '0.9.1'
+    description: >-
+      Local RabbitMQ. Messages are published to durable topic exchange kavohub.events;
+      routing key is the channel address. Consumer inbox/retry/DLQ queues are declared
+      separately by each module.
+channels:
+  invoiceIssued:
+    address: billing.invoice.issued
+    description: >-
+      Billing has committed issuance in its own domain. Odoo synchronization is asynchronous
+      and may still be pending. This refines the README v0 wording and requires consumer review.
+      invoiceVersion orders this invoice snapshot relative to later invoice-state events.
+    messages:
+      InvoiceIssued:
+        $ref: '#/components/messages/InvoiceIssued'
+  paymentReceived:
+    address: billing.payment.received
+    description: >-
+      Published only after accountant-confirmed allocation has committed. Unmatched payments
+      do not produce this event. allocations contains one or more confirmed invoice allocations.
+      This is payment/allocation notification; consumers use invoiceVersioned invoice-state
+      events, not this event, as the authority for the current invoice or order settlement state.
+    messages:
+      PaymentReceived:
+        $ref: '#/components/messages/PaymentReceived'
+  invoicePaymentStatusChanged:
+    address: billing.invoice.payment_status_changed
+    description: >-
+      Proposed event. Describes the settlement state of one invoice only. Orders owns the
+      aggregation of all invoices belonging to an order. Proposed order paid rule: every invoice
+      is paid and every order line is shipped and invoiced. Orders stores the latest invoiceVersion
+      per invoiceId, discards versions not greater than the stored version, and reconciles gaps via
+      its own GET /orders/{orderId}/invoices endpoint. The endpoint is not part of Billing API.
+    messages:
+      InvoicePaymentStatusChanged:
+        $ref: '#/components/messages/InvoicePaymentStatusChanged'
+  creditNoteIssued:
+    address: billing.credit_note.issued
+    description: >-
+      Proposed event for downstream visibility when an issued credit note changes the invoice
+      balance or creates customer credit. Orders must confirm whether it consumes this event.
+      It carries the resulting invoice snapshot and version; do not emit a second state event
+      for the same invoice mutation with the same invoiceVersion. For a credit note after full
+      payment, invoice status remains paid and the proposed Orders behavior leaves order status
+      unchanged; the credit note is represented by this event rather than a payment-status change.
+    messages:
+      CreditNoteIssued:
+        $ref: '#/components/messages/CreditNoteIssued'
+operations:
+  publishInvoiceIssued:
+    action: send
+    channel:
+      $ref: '#/channels/invoiceIssued'
+    messages:
+      - $ref: '#/channels/invoiceIssued/messages/InvoiceIssued'
+  publishPaymentReceived:
+    action: send
+    channel:
+      $ref: '#/channels/paymentReceived'
+    messages:
+      - $ref: '#/channels/paymentReceived/messages/PaymentReceived'
+  publishInvoicePaymentStatusChanged:
+    action: send
+    channel:
+      $ref: '#/channels/invoicePaymentStatusChanged'
+    messages:
+      - $ref: '#/channels/invoicePaymentStatusChanged/messages/InvoicePaymentStatusChanged'
+  publishCreditNoteIssued:
+    action: send
+    channel:
+      $ref: '#/channels/creditNoteIssued'
+    messages:
+      - $ref: '#/channels/creditNoteIssued/messages/CreditNoteIssued'
+components:
+  messages:
+    InvoiceIssued:
+      name: InvoiceIssued
+      title: Billing invoice issued
+      contentType: application/json
+      correlationId:
+        location: $message.payload#/correlationId
+      payload:
+        $ref: '#/components/schemas/InvoiceIssuedEnvelope'
+      examples:
+        - name: invoiceIssued
+          payload:
+            specversion: '1.0'
+            id: 8f6c2a3e-1b7d-4c55-9a0e-2f3b4c5d6e7f
+            type: billing.invoice.issued
+            source: kavohub/billing
+            time: '2026-11-23T10:15:30Z'
+            correlationId: c0ffee00-1234-4abc-9def-000000000042
+            dataschema: billing.asyncapi.yaml#/components/schemas/InvoiceIssuedData
+            data:
+              invoiceId: 2b1b4f67-e9dc-4b07-80a2-8ec5a85b0d62
+              invoiceVersion: 1
+              orderId: ORD-2026-004213
+              shipmentId: SHP-2026-001027
+              billingInvoiceNumber: KH/2026/000123
+              accountId: ACC-000587
+              totalAmount: '12500.00'
+              currency: UAH
+              issuedAt: '2026-11-23T10:15:30Z'
+              dueAt: '2026-12-08'
+    PaymentReceived:
+      name: PaymentReceived
+      title: Payment received and allocated
+      contentType: application/json
+      correlationId:
+        location: $message.payload#/correlationId
+      payload:
+        $ref: '#/components/schemas/PaymentReceivedEnvelope'
+      examples:
+        - name: paymentAllocated
+          payload:
+            specversion: '1.0'
+            id: 6e3f3cd2-b877-4cd3-9b6e-e8e474cc9a28
+            type: billing.payment.received
+            source: kavohub/billing
+            time: '2026-11-23T12:30:00Z'
+            correlationId: c0ffee00-1234-4abc-9def-000000000042
+            dataschema: billing.asyncapi.yaml#/components/schemas/PaymentReceivedData
+            data:
+              paymentId: e7ef6bd4-385e-4772-bfe2-64f982e5d4ae
+              receivedAt: '2026-11-23T09:05:00Z'
+              amount: '12500.00'
+              currency: UAH
+              allocations:
+                - invoiceId: 2b1b4f67-e9dc-4b07-80a2-8ec5a85b0d62
+                  amount: '12500.00'
+    InvoicePaymentStatusChanged:
+      name: InvoicePaymentStatusChanged
+      title: Invoice settlement status changed
+      summary: Proposed contract pending Orders acceptance
+      contentType: application/json
+      correlationId:
+        location: $message.payload#/correlationId
+      payload:
+        $ref: '#/components/schemas/InvoicePaymentStatusChangedEnvelope'
+    CreditNoteIssued:
+      name: CreditNoteIssued
+      title: Credit note issued
+      summary: Proposed contract pending Orders acceptance
+      contentType: application/json
+      correlationId:
+        location: $message.payload#/correlationId
+      payload:
+        $ref: '#/components/schemas/CreditNoteIssuedEnvelope'
+  schemas:
+    EventEnvelope:
+      type: object
+      required: [specversion, id, type, source, time, correlationId, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          const: '1.0'
+        id:
+          type: string
+          format: uuid
+          description: Unique event ID; unchanged when the outbox republishes the same event.
+        type:
+          type: string
+        source:
+          type: string
+          const: kavohub/billing
+        time:
+          type: string
+          format: date-time
+        correlationId:
+          type: string
+          format: uuid
+        causationId:
+          type: string
+          format: uuid
+          description: Optional ID of the command or event that caused this event.
+        dataschema:
+          type: string
+        data:
+          type: object
+      additionalProperties: false
+    Money:
+      type: string
+      pattern: '^(0|[1-9][0-9]{0,11})(\.[0-9]{1,2})?$'
+      description: >-
+        Decimal string matching PostgreSQL NUMERIC(14,2): at most 12 integer digits and 2
+        fractional digits; no binary floating point.
+      examples: ['12500.00']
+    Currency:
+      type: string
+      pattern: '^[A-Z]{3}$'
+      examples: [UAH, EUR]
+    BillingId:
+      type: string
+      format: uuid
+    ExternalId:
+      type: string
+      minLength: 1
+      maxLength: 200
+      description: Opaque identifier owned by another module; Billing does not parse it.
+    InvoiceIssuedData:
+      type: object
+      required:
+        - invoiceId
+        - invoiceVersion
+        - orderId
+        - shipmentId
+        - billingInvoiceNumber
+        - accountId
+        - totalAmount
+        - currency
+        - issuedAt
+        - dueAt
+      properties:
+        invoiceId: { $ref: '#/components/schemas/BillingId' }
+        invoiceVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            Monotonically increasing per invoice for every consumer-visible invoice state or
+            balance change. Consumers discard stale versions; timestamps are informational only.
+        orderId: { $ref: '#/components/schemas/ExternalId' }
+        shipmentId: { $ref: '#/components/schemas/ExternalId' }
+        billingInvoiceNumber: { type: string, minLength: 1 }
+        accountId: { $ref: '#/components/schemas/ExternalId' }
+        totalAmount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        issuedAt: { type: string, format: date-time }
+        dueAt:
+          type: string
+          format: date
+          description: Business due date as a calendar date, consistent with lab-02.
+      additionalProperties: false
+    PaymentAllocation:
+      type: object
+      required: [invoiceId, amount]
+      properties:
+        invoiceId: { $ref: '#/components/schemas/BillingId' }
+        amount: { $ref: '#/components/schemas/Money' }
+      additionalProperties: false
+    PaymentReceivedData:
+      type: object
+      required: [paymentId, receivedAt, amount, currency, allocations]
+      properties:
+        paymentId: { $ref: '#/components/schemas/BillingId' }
+        receivedAt: { type: string, format: date-time }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        allocations:
+          type: array
+          minItems: 1
+          description: Confirmed allocations only; the event is emitted after allocate commits.
+          items: { $ref: '#/components/schemas/PaymentAllocation' }
+      additionalProperties: false
+    InvoicePaymentStatusChangedData:
+      type: object
+      required: [invoiceId, invoiceVersion, orderId, status, outstandingAmount, currency, changedAt]
+      properties:
+        invoiceId: { $ref: '#/components/schemas/BillingId' }
+        invoiceVersion: { type: integer, format: int64, minimum: 1 }
+        orderId: { $ref: '#/components/schemas/ExternalId' }
+        status: { type: string, enum: [unpaid, partially_paid, paid, credited] }
+        outstandingAmount: { $ref: '#/components/schemas/Money' }
+        customerCreditAmount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        changedAt:
+          type: string
+          format: date-time
+          description: Audit/display timestamp only; do not use it to order events.
+      additionalProperties: false
+    CreditNoteIssuedData:
+      type: object
+      required: [creditNoteId, invoiceId, invoiceVersion, orderId, creditNoteNumber, amount, currency, invoiceStatus, outstandingAmount, issuedAt]
+      properties:
+        creditNoteId: { $ref: '#/components/schemas/BillingId' }
+        invoiceId: { $ref: '#/components/schemas/BillingId' }
+        invoiceVersion: { type: integer, format: int64, minimum: 1 }
+        orderId: { $ref: '#/components/schemas/ExternalId' }
+        creditNoteNumber: { type: string, minLength: 1 }
+        amount: { $ref: '#/components/schemas/Money' }
+        customerCreditAmount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        invoiceStatus: { type: string, enum: [unpaid, partially_paid, paid, credited] }
+        outstandingAmount: { $ref: '#/components/schemas/Money' }
+        issuedAt:
+          type: string
+          format: date-time
+          description: Audit timestamp only; use invoiceVersion for ordering invoice state.
+      additionalProperties: false
+    InvoiceIssuedEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: billing.invoice.issued }
+            data: { $ref: '#/components/schemas/InvoiceIssuedData' }
+    PaymentReceivedEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: billing.payment.received }
+            data: { $ref: '#/components/schemas/PaymentReceivedData' }
+    InvoicePaymentStatusChangedEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: billing.invoice.payment_status_changed }
+            data: { $ref: '#/components/schemas/InvoicePaymentStatusChangedData' }
+    CreditNoteIssuedEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: billing.credit_note.issued }
+            data: { $ref: '#/components/schemas/CreditNoteIssuedData' }

@@ -1,0 +1,879 @@
+openapi: 3.1.0
+info:
+  title: KavoHub Billing API
+  version: 0.1.0
+  description: >-
+    Contract-first draft based on the Billing API tables in lab-02 and lab-02-billing-golubiev.
+    Own resource IDs (invoiceId, paymentId, creditNoteId) are UUIDs. IDs owned by other
+    modules are opaque strings. Roles are Keycloak JWT roles; x-required-roles documents
+    the authorization policy for each operation.
+x-problem-types:
+  badRequest: https://kavohub.example/problems/bad-request
+  unauthorized: https://kavohub.example/problems/unauthorized
+  forbidden: https://kavohub.example/problems/forbidden
+  notFound: https://kavohub.example/problems/not-found
+  conflict: https://kavohub.example/problems/conflict
+  invalidTransition: https://kavohub.example/problems/invalid-transition
+  requestInProgress: https://kavohub.example/problems/request-in-progress
+  idempotencyKeyReuse: https://kavohub.example/problems/idempotency-key-reuse
+  validationError: https://kavohub.example/problems/validation-error
+  internalError: https://kavohub.example/problems/internal-error
+x-contract-governance:
+  versioning: >-
+    info.version identifies the contract release. Additive optional response fields and new
+    operations are compatible. Removing/renaming fields, changing requiredness or types, or
+    changing command semantics is breaking and requires a new major API contract version.
+  lintRules:
+    - Every operation has a unique operationId.
+    - All 4xx business errors use application/problem+json and a registered Problem type.
+    - Every mutating POST requires Idempotency-Key, except signed provider webhooks, which deduplicate by providerEventId.
+    - Every operation accepts X-Correlation-Id.
+    - Resource paths use lowercase nouns and path parameters use camelCase IDs.
+  consumerMock: >-
+    Consumers can use Prism mock mode from this contract before Billing is implemented.
+    Contract changes require consumer review before publication.
+servers:
+  - url: http://localhost:8104
+    description: Local development
+tags:
+  - name: Invoices
+    description: Draft, issue, retrieve, cancel and document invoice operations.
+  - name: Payments
+    description: Payment import, matching proposals and confirmed allocation operations.
+  - name: Receivables
+    description: Invoice balance and aging queries.
+  - name: Webhooks
+    description: Future payment-provider webhook intake contract; not part of current implementation.
+security:
+  - bearerAuth: []
+paths:
+  /invoices:
+    post:
+      tags: [Invoices]
+      operationId: createInvoice
+      summary: Create a draft invoice
+      description: >-
+        svc-billing creates an invoice from a trusted shipment flow. An accountant may
+        create a draft manually. shipmentId is unique for shipment-generated invoices.
+      x-required-roles: [accountant, svc-billing]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvoiceCreateRequest'
+      responses:
+        '201':
+          description: Draft invoice created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    get:
+      tags: [Invoices]
+      operationId: listInvoices
+      summary: List invoices with current balances
+      x-required-roles: [accountant, svc-billing]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [draft, issued, partially_paid, paid, credited, cancelled]
+        - name: overdue
+          in: query
+          required: false
+          schema:
+            type: boolean
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Invoice page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InvoicePage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /invoices/{invoiceId}:
+    parameters:
+      - $ref: '#/components/parameters/InvoiceId'
+    get:
+      tags: [Invoices]
+      operationId: getInvoice
+      summary: Get invoice and accounting synchronization status
+      x-required-roles: [accountant, svc-billing, svc-orders, svc-notifications]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Invoice details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /invoices/{invoiceId}/lines:
+    parameters:
+      - $ref: '#/components/parameters/InvoiceId'
+    put:
+      tags: [Invoices]
+      operationId: replaceInvoiceLines
+      summary: Replace invoice lines while the invoice is draft
+      x-required-roles: [accountant]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvoiceLinesRequest'
+      responses:
+        '200':
+          description: Draft lines replaced and totals recalculated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidTransition' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /invoices/{invoiceId}/issue:
+    parameters:
+      - $ref: '#/components/parameters/InvoiceId'
+    post:
+      tags: [Invoices]
+      operationId: issueInvoice
+      summary: Issue an invoice and assign the Billing invoice number
+      description: >-
+        Billing commits the issue, outbox event, and Odoo sync job atomically.
+        Odoo synchronization is asynchronous; the response may have odooSyncStatus=pending.
+      x-required-roles: [accountant, svc-billing]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Invoice issued; repeated idempotent requests return the stored result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Invalid transition, conflicting idempotency request, or request in progress
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /invoices/{invoiceId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/InvoiceId'
+    post:
+      tags: [Invoices]
+      operationId: cancelDraftInvoice
+      summary: Cancel a draft invoice
+      x-required-roles: [accountant]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelInvoiceRequest'
+      responses:
+        '200':
+          description: Draft cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invoice'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidTransition' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /invoices/{invoiceId}/credit-notes:
+    parameters:
+      - $ref: '#/components/parameters/InvoiceId'
+    post:
+      tags: [Invoices]
+      operationId: issueCreditNote
+      summary: Issue a credit note for an issued invoice
+      x-required-roles: [accountant]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreditNoteCreateRequest'
+      responses:
+        '201':
+          description: Credit note issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreditNote'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidTransition' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /invoices/{invoiceId}/document:
+    parameters:
+      - $ref: '#/components/parameters/InvoiceId'
+    get:
+      tags: [Invoices]
+      operationId: getInvoiceDocument
+      summary: Retrieve the customer invoice PDF
+      description: >-
+        The PDF uses billingInvoiceNumber. It is available after Billing issues the invoice
+        and does not wait for Odoo synchronization.
+      x-required-roles: [accountant, svc-notifications]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: PDF document
+          content:
+            application/pdf:
+              schema:
+                type: string
+                contentMediaType: application/pdf
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /payment-imports:
+    post:
+      tags: [Payments]
+      operationId: createPaymentImport
+      summary: Upload a bank statement CSV for asynchronous processing
+      x-required-roles: [accountant]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [sourceBank, file]
+              properties:
+                sourceBank:
+                  type: string
+                  minLength: 1
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '202':
+          description: Import batch accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentImportBatch'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /payments:
+    post:
+      tags: [Payments]
+      operationId: createPayment
+      summary: Record a manual payment or a normalized imported bank row
+      x-required-roles: [accountant, svc-billing]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentCreateRequest'
+      responses:
+        '201':
+          description: Payment recorded as unmatched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /payments/{paymentId}/proposals:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      tags: [Payments]
+      operationId: proposePaymentMatches
+      summary: Generate invoice match proposals without allocating the payment
+      x-required-roles: [svc-billing]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Match proposals generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentProposalResult'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidTransition' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /payments/{paymentId}/allocate:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      tags: [Payments]
+      operationId: allocatePayment
+      summary: Confirm one or more payment allocations
+      description: Only accountant may confirm allocations. svc-billing receives 403.
+      x-required-roles: [accountant]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AllocatePaymentRequest'
+      responses:
+        '200':
+          description: Allocation confirmed and balances recalculated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAllocationResult'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /invoices/{invoiceId}/payment-status:
+    parameters:
+      - $ref: '#/components/parameters/InvoiceId'
+    get:
+      tags: [Invoices]
+      operationId: getInvoicePaymentStatus
+      summary: Get settlement status for one invoice
+      description: Orders aggregates the status of all invoices belonging to an order.
+      x-required-roles: [accountant, svc-billing, svc-orders]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Settlement state of this invoice only
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvoicePaymentStatus'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /invoices/{invoiceId}/odoo-sync:
+    parameters:
+      - $ref: '#/components/parameters/InvoiceId'
+    get:
+      tags: [Invoices]
+      operationId: getOdooSyncStatus
+      summary: Get Odoo synchronization status and journal number
+      x-required-roles: [accountant, svc-billing]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Odoo sync state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OdooSyncStatus'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /receivables/aging:
+    get:
+      tags: [Receivables]
+      operationId: getReceivablesAging
+      summary: Get receivables aging as of a date
+      x-required-roles: [accountant, director]
+      parameters:
+        - name: asOf
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Aging buckets and invoice details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgingReport'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /webhooks/payments:
+    post:
+      tags: [Webhooks]
+      operationId: acceptPaymentProviderWebhook
+      summary: Accept a future payment-provider webhook
+      description: >-
+        Contract-only future integration; this project does not implement the provider.
+        Verify HMAC-SHA256 over the raw request body, deduplicate by providerEventId,
+        durably enqueue before returning 2xx, and process asynchronously. Provider statuses
+        may arrive out of order; stale transitions must not overwrite a later terminal state.
+      x-lifecycle: planned
+      parameters:
+        - name: X-Provider-Signature
+          in: header
+          required: true
+          description: HMAC-SHA256 signature of the exact raw request body
+          schema: { type: string, minLength: 1 }
+        - $ref: '#/components/parameters/CorrelationId'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentProviderWebhook'
+      responses:
+        '202':
+          description: Webhook durably accepted for asynchronous processing
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted: { type: boolean, const: true }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Invalid webhook signature
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '500': { $ref: '#/components/responses/InternalError' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak JWT in the kavohub realm; operation roles are listed in x-required-roles.
+  parameters:
+    InvoiceId:
+      name: invoiceId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        UUID scoped to caller and operation. Same key and same request returns the stored
+        response; same key with a different body returns 422 idempotency-key-reuse;
+        an in-progress request returns 409 request-in-progress. Retain for at least 24 hours.
+      schema: { type: string, format: uuid }
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: UUID propagated across HTTP calls and emitted events; Billing generates one if absent.
+      schema: { type: string, format: uuid }
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or invalid access token
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Caller does not have the required role
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Duplicate, concurrent conflict, or idempotency-key conflict
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    InvalidTransition:
+      description: Operation is not allowed from the current resource state
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    InternalError:
+      description: Unexpected internal failure
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    Money:
+      type: string
+      pattern: '^(0|[1-9][0-9]{0,11})(\.[0-9]{1,2})?$'
+      examples: ['1250.00']
+      description: >-
+        Decimal amount encoded as a string to avoid binary floating-point rounding. Matches
+        PostgreSQL NUMERIC(14,2): at most 12 integer digits and 2 fractional digits.
+    Currency:
+      type: string
+      pattern: '^[A-Z]{3}$'
+      examples: [UAH, EUR]
+    ExternalId:
+      type: string
+      minLength: 1
+      maxLength: 200
+      description: Opaque identifier owned by another module; Billing does not parse its format.
+    InvoiceLineInput:
+      type: object
+      additionalProperties: false
+      required: [sku, description, quantity, unit, unitPrice, taxRate]
+      properties:
+        sku: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, minLength: 1, maxLength: 500 }
+        quantity:
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,8})(\.[0-9]{1,3})?$'
+        unit: { type: string, minLength: 1, maxLength: 30 }
+        unitPrice: { $ref: '#/components/schemas/Money' }
+        taxRate:
+          type: string
+          pattern: '^(0|[1-9][0-9]*)(\.[0-9]{1,2})?$'
+    InvoiceLine:
+      allOf:
+        - $ref: '#/components/schemas/InvoiceLineInput'
+        - type: object
+          required: [lineId, netAmount, taxAmount, totalAmount]
+          properties:
+            lineId: { type: string, format: uuid }
+            netAmount: { $ref: '#/components/schemas/Money' }
+            taxAmount: { $ref: '#/components/schemas/Money' }
+            totalAmount: { $ref: '#/components/schemas/Money' }
+    InvoiceCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [accountId, currency, dueAt, lines]
+      properties:
+        accountId: { $ref: '#/components/schemas/ExternalId' }
+        orderId: { $ref: '#/components/schemas/ExternalId' }
+        shipmentId:
+          allOf:
+            - $ref: '#/components/schemas/ExternalId'
+          description: Required for trusted shipment-driven creation; unique per invoice.
+        currency: { $ref: '#/components/schemas/Currency' }
+        issueDate: { type: string, format: date }
+        dueAt: { type: string, format: date }
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/InvoiceLineInput' }
+    InvoiceLinesRequest:
+      type: object
+      additionalProperties: false
+      required: [lines]
+      properties:
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/InvoiceLineInput' }
+    Invoice:
+      type: object
+      required: [invoiceId, accountId, currency, status, invoiceVersion, totalAmount, outstandingAmount, lines, createdAt]
+      properties:
+        invoiceId: { type: string, format: uuid }
+        invoiceVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            Monotonically increasing per invoice. Increment for each consumer-visible state or
+            balance change; timestamp ordering is not supported.
+        accountId: { $ref: '#/components/schemas/ExternalId' }
+        orderId: { $ref: '#/components/schemas/ExternalId' }
+        shipmentId: { $ref: '#/components/schemas/ExternalId' }
+        billingInvoiceNumber: { type: [string, 'null'] }
+        odooJournalNumber: { type: [string, 'null'] }
+        currency: { $ref: '#/components/schemas/Currency' }
+        status:
+          type: string
+          enum: [draft, issued, partially_paid, paid, credited, cancelled]
+        totalAmount: { $ref: '#/components/schemas/Money' }
+        outstandingAmount: { $ref: '#/components/schemas/Money' }
+        issueDate: { type: [string, 'null'], format: date }
+        dueAt: { type: string, format: date }
+        odooSyncStatus:
+          type: string
+          enum: [pending, synced, manual_review]
+        lines:
+          type: array
+          items: { $ref: '#/components/schemas/InvoiceLine' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CancelInvoiceRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+    CreditNoteLineInput:
+      type: object
+      additionalProperties: false
+      required: [invoiceLineId, quantity, amount]
+      properties:
+        invoiceLineId: { type: string, format: uuid }
+        quantity:
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,8})(\.[0-9]{1,3})?$'
+        amount: { $ref: '#/components/schemas/Money' }
+    CreditNoteCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, currency, lines]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+        currency: { $ref: '#/components/schemas/Currency' }
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/CreditNoteLineInput' }
+    CreditNote:
+      type: object
+      required: [creditNoteId, invoiceId, number, status, amount, currency, issuedAt]
+      properties:
+        creditNoteId: { type: string, format: uuid }
+        invoiceId: { type: string, format: uuid }
+        number: { type: string }
+        status: { type: string, enum: [issued] }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        issuedAt: { type: string, format: date-time }
+    PaymentImportBatch:
+      type: object
+      required: [batchId, sourceBank, status, importedAt]
+      properties:
+        batchId: { type: string, format: uuid }
+        sourceBank: { type: string }
+        status: { type: string, enum: [accepted, processing, completed, failed] }
+        importedAt: { type: string, format: date-time }
+        rowCount: { type: integer, minimum: 0 }
+    PaymentCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [sourceBank, bankReference, paymentDate, amount, currency, payerEdrpou, purpose]
+      properties:
+        batchId: { type: string, format: uuid }
+        sourceBank: { type: string, minLength: 1 }
+        bankReference: { type: string, minLength: 1, maxLength: 200 }
+        paymentDate: { type: string, format: date }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        payerEdrpou: { type: string, pattern: '^[0-9]{8,10}$' }
+        purpose: { type: string, maxLength: 2000 }
+    Payment:
+      type: object
+      required: [paymentId, sourceBank, bankReference, paymentDate, amount, currency, status]
+      properties:
+        paymentId: { type: string, format: uuid }
+        sourceBank: { type: string }
+        bankReference: { type: string }
+        paymentDate: { type: string, format: date }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        status:
+          type: string
+          enum: [unmatched, proposed, partially_allocated, allocated]
+    PaymentCandidate:
+      type: object
+      required: [invoiceId, proposedAmount, reason]
+      properties:
+        invoiceId: { type: string, format: uuid }
+        proposedAmount: { $ref: '#/components/schemas/Money' }
+        reason: { type: string }
+    PaymentProposalResult:
+      type: object
+      required: [paymentId, status, candidates]
+      properties:
+        paymentId: { type: string, format: uuid }
+        status: { type: string, enum: [proposed] }
+        candidates:
+          type: array
+          items: { $ref: '#/components/schemas/PaymentCandidate' }
+    AllocationInput:
+      type: object
+      additionalProperties: false
+      required: [invoiceId, amount]
+      properties:
+        invoiceId: { type: string, format: uuid }
+        amount: { $ref: '#/components/schemas/Money' }
+    AllocatePaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [allocations]
+      properties:
+        allocations:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AllocationInput' }
+        customerCreditAmount: { $ref: '#/components/schemas/Money' }
+    PaymentAllocationResult:
+      type: object
+      required: [paymentId, status, allocations]
+      properties:
+        paymentId: { type: string, format: uuid }
+        status: { type: string, enum: [partially_allocated, allocated] }
+        allocations:
+          type: array
+          items: { $ref: '#/components/schemas/AllocationInput' }
+        customerCreditAmount: { $ref: '#/components/schemas/Money' }
+    InvoicePaymentStatus:
+      type: object
+      required: [invoiceId, invoiceVersion, status, outstandingAmount, currency, changedAt]
+      properties:
+        invoiceId: { type: string, format: uuid }
+        invoiceVersion:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Monotonic invoice aggregate version; changedAt is informational only.
+        orderId: { $ref: '#/components/schemas/ExternalId' }
+        status: { type: string, enum: [unpaid, partially_paid, paid, credited] }
+        outstandingAmount: { $ref: '#/components/schemas/Money' }
+        customerCreditAmount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        changedAt: { type: string, format: date-time }
+    OdooSyncStatus:
+      type: object
+      required: [invoiceId, status, updatedAt]
+      properties:
+        invoiceId: { type: string, format: uuid }
+        status: { type: string, enum: [pending, synced, manual_review] }
+        odooRecordId: { type: [integer, 'null'], minimum: 1 }
+        odooJournalNumber: { type: [string, 'null'] }
+        lastError: { type: [string, 'null'] }
+        updatedAt: { type: string, format: date-time }
+    InvoicePage:
+      type: object
+      required: [items, page, pageSize, totalItems]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Invoice' }
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1 }
+        totalItems: { type: integer, minimum: 0 }
+    AgingBucket:
+      type: object
+      required: [bucket, totalAmount, currency, invoiceCount]
+      properties:
+        bucket: { type: string, enum: [current, days_0_30, days_31_60, days_61_plus] }
+        totalAmount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+        invoiceCount: { type: integer, minimum: 0 }
+    AgingReport:
+      type: object
+      required: [asOf, buckets]
+      properties:
+        asOf: { type: string, format: date }
+        buckets:
+          type: array
+          items: { $ref: '#/components/schemas/AgingBucket' }
+    PaymentProviderWebhook:
+      type: object
+      additionalProperties: true
+      required: [providerEventId, providerPaymentId, status, occurredAt, amount, currency]
+      properties:
+        providerEventId: { type: string, minLength: 1, maxLength: 200 }
+        providerPaymentId: { type: string, minLength: 1, maxLength: 200 }
+        status: { type: string, enum: [processing, success, failed, refunded] }
+        occurredAt: { type: string, format: date-time }
+        amount: { $ref: '#/components/schemas/Money' }
+        currency: { $ref: '#/components/schemas/Currency' }
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details with extension members.
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        currentState: { type: string }
+        allowedActions:
+          type: array
+          items: { type: string }
+      additionalProperties: true
