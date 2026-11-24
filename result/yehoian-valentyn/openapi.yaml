@@ -1,0 +1,730 @@
+openapi: 3.1.0
+info:
+  title: KavoHub Notifications / Reporting API
+  version: 1.0.1
+  description: >-
+    Журнал сповіщень, звіти й метадані шаблонів. Успішні відповіді —
+    application/json; помилки — application/problem+json (RFC 9457).
+servers:
+  - url: https://notifications.kavohub.example
+  - url: http://localhost:8107
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+  - name: Notifications
+  - name: Reports
+  - name: Templates
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: getLiveness
+      summary: Перевірити liveness сервісу
+      description: Liveness без автентифікації; стан залежностей не перевіряється.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Процес працює
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+              examples:
+                alive:
+                  value: { status: ok }
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/notifications:
+    get:
+      tags: [Notifications]
+      operationId: listNotifications
+      summary: Переглянути журнал сповіщень
+      description: Email маскується; вміст листа не повертається, зокрема admin.
+      x-required-roles: [director, warehouse_operator, sales_manager, admin]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: dateFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: dateTo
+          in: query
+          schema: { type: string, format: date }
+        - name: type
+          in: query
+          schema: { $ref: '#/components/schemas/NotificationType' }
+        - name: state
+          in: query
+          schema: { $ref: '#/components/schemas/NotificationState' }
+        - name: page
+          in: query
+          description: Номер сторінки, починаючи з 1.
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: pageSize
+          in: query
+          description: Кількість записів на сторінці.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Сторінка журналу
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationPage' }
+              examples:
+                populated:
+                  value:
+                    items:
+                      - id: a4b756a3-118a-4eae-8ef9-962f69fa7392
+                        notificationType: shipment_with_tracking
+                        recipient: { id: 'crm:partner:87', emailMasked: 'm***@example.com' }
+                        state: sent
+                        attemptCount: 1
+                        deliveryCycle: 1
+                        createdAt: '2026-11-24T15:00:00Z'
+                        updatedAt: '2026-11-24T15:00:03Z'
+                    page: 1
+                    pageSize: 20
+                    total: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AccessDenied'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/notifications/{id}:
+    get:
+      tags: [Notifications]
+      operationId: getNotification
+      summary: Переглянути сповіщення та спроби доставки
+      description: Чужий запис повертає 403, неіснуючий ID — 404. Email маскується; вміст листа не повертається.
+      x-required-roles: [director, warehouse_operator, sales_manager, admin]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/NotificationId'
+      responses:
+        '200':
+          description: Сповіщення з історією спроб
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Notification' }
+              examples:
+                sent:
+                  value:
+                    id: a4b756a3-118a-4eae-8ef9-962f69fa7392
+                    notificationType: shipment_with_tracking
+                    recipient: { id: 'crm:partner:87', emailMasked: 'm***@example.com' }
+                    state: sent
+                    attemptCount: 1
+                    deliveryCycle: 1
+                    createdAt: '2026-11-24T15:00:00Z'
+                    updatedAt: '2026-11-24T15:00:03Z'
+                    attempts:
+                      - attemptNo: 1
+                        startedAt: '2026-11-24T15:00:02Z'
+                        finishedAt: '2026-11-24T15:00:03Z'
+                        outcome: success
+                        errorCode: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AccessDenied'
+        '404':
+          $ref: '#/components/responses/NotificationNotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/notifications/{id}/resend:
+    post:
+      tags: [Notifications]
+      operationId: resendNotification
+      summary: Поставити повторну доставку в чергу
+      description: >-
+        Лише admin і лише для final_failed. Ключ, хеш тіла та відповідь
+        зберігаються 24 години. Той самий ключ і тіло повертають ту саму
+        відповідь 202 без нового циклу; той самий ключ з іншим тілом дає 422.
+      x-required-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - $ref: '#/components/parameters/NotificationId'
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: UUID ключ ідемпотентності зі строком зберігання 24 години.
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ResendRequest' }
+            examples:
+              retry:
+                value: { reason: 'Поштовий сервіс відновив роботу.' }
+      responses:
+        '202':
+          description: Повтор поставлено в чергу; відповідь ідентична при безпечному повторі запиту
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ResendAccepted' }
+              examples:
+                accepted:
+                  value:
+                    notificationId: a4b756a3-118a-4eae-8ef9-962f69fa7392
+                    state: pending
+                    deliveryCycle: 2
+                    acceptedAt: '2026-11-24T15:10:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AccessDenied'
+        '404':
+          $ref: '#/components/responses/NotificationNotFound'
+        '409':
+          description: Запит у процесі або повтор недозволений для поточного стану
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                requestInProgress:
+                  $ref: '#/components/examples/RequestInProgress'
+                retryNotAllowed:
+                  $ref: '#/components/examples/RetryNotAllowed'
+        '422':
+          description: Некоректна причина, ключ або повторне використання ключа з іншим тілом
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+              examples:
+                keyReuse:
+                  $ref: '#/components/examples/IdempotencyKeyReuse'
+                validation:
+                  $ref: '#/components/examples/ValidationProblem'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/reports/daily:
+    get:
+      tags: [Reports]
+      operationId: getDailyReport
+      summary: Отримати щоденний звіт
+      x-required-roles: [director]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: date
+          in: query
+          required: true
+          schema: { type: string, format: date }
+          example: '2026-11-24'
+      responses:
+        '200':
+          description: Знімок звіту; відсутні метрики мають null
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DailyReport' }
+              examples:
+                incomplete:
+                  value:
+                    date: '2026-11-24'
+                    generatedAt: '2026-11-24T18:00:00Z'
+                    completeness:
+                      status: incomplete
+                      missingSources: [billing]
+                      staleSources:
+                        - source: inventory
+                          lastSyncAt: '2026-11-24T17:30:00Z'
+                    metrics:
+                      ordersAccepted: 18
+                      shipmentsDispatched: 12
+                      outstandingDebt: null
+                      currency: UAH
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AccessDenied'
+        '404':
+          $ref: '#/components/responses/ReportNotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/reports/inactive-renters:
+    get:
+      tags: [Reports]
+      operationId: getInactiveRentersReport
+      summary: Отримати звіт про неактивних орендарів
+      description: sales_manager бачить лише орендарів своєї команди.
+      x-required-roles: [director, admin, sales_manager]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+        - name: weekOf
+          in: query
+          required: true
+          description: Дата понеділка звітного тижня.
+          schema: { type: string, format: date }
+          example: '2026-11-23'
+      responses:
+        '200':
+          description: Знімок звіту
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InactiveRentersReport' }
+              examples:
+                populated:
+                  value:
+                    weekOf: '2026-11-23'
+                    generatedAt: '2026-11-24T18:00:00Z'
+                    completeness:
+                      status: complete
+                      missingSources: []
+                      staleSources: []
+                    items:
+                      - renterId: renter-104
+                        displayName: ТОВ Приклад
+                        lastActivityAt: '2026-10-30T09:15:00Z'
+                    total: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AccessDenied'
+        '404':
+          $ref: '#/components/responses/ReportNotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/v1/templates:
+    get:
+      tags: [Templates]
+      operationId: listTemplates
+      summary: Переглянути метадані шаблонів
+      description: Відповідь містить лише метадані; вміст листа та секрети не повертаються.
+      x-required-roles: [admin]
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      responses:
+        '200':
+          description: Шаблони без вмісту листа та секретів
+          headers:
+            X-Correlation-Id:
+              $ref: '#/components/headers/CorrelationId'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Template' }
+              examples:
+                templates:
+                  value:
+                    items:
+                      - id: tpl-shipment-tracking-v1
+                        notificationType: shipment_with_tracking
+                        name: Відвантаження з номером ТТН
+                        locale: uk-UA
+                        active: true
+                        updatedAt: '2026-11-20T12:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AccessDenied'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: Відсутнє або невалідне значення сервіс замінює новим UUID.
+      schema: { type: string, format: uuid }
+    NotificationId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  headers:
+    CorrelationId:
+      description: UUID кореляції, переданий або згенерований сервісом.
+      schema: { type: string, format: uuid }
+  responses:
+    BadRequest:
+      description: Некоректний запит
+      headers:
+        X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            badRequest: { $ref: '#/components/examples/BadRequestProblem' }
+    Unauthorized:
+      description: Відсутній або невалідний bearer JWT
+      headers:
+        X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            unauthorized: { $ref: '#/components/examples/UnauthorizedProblem' }
+    AccessDenied:
+      description: Немає потрібної ролі або доступу до області даних
+      headers:
+        X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            denied: { $ref: '#/components/examples/AccessDeniedProblem' }
+    NotificationNotFound:
+      description: Сповіщення з таким ID не існує
+      headers:
+        X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            notFound: { $ref: '#/components/examples/NotificationNotFoundProblem' }
+    ReportNotFound:
+      description: Знімок звіту не знайдено
+      headers:
+        X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            notFound: { $ref: '#/components/examples/ReportNotFoundProblem' }
+    ValidationError:
+      description: Невалідний параметр запиту
+      headers:
+        X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            invalid: { $ref: '#/components/examples/ValidationProblem' }
+    ServiceUnavailable:
+      description: Сервіс тимчасово недоступний
+      headers:
+        X-Correlation-Id: { $ref: '#/components/headers/CorrelationId' }
+        Retry-After:
+          description: Секунди до рекомендованого повтору, якщо відомо.
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            unavailable: { $ref: '#/components/examples/ServiceUnavailableProblem' }
+  examples:
+    BadRequestProblem:
+      value:
+        type: 'urn:kavohub:problem:bad-request'
+        title: Некоректний запит
+        status: 400
+        detail: Перевірте формат запиту.
+        instance: /api/v1/notifications
+    UnauthorizedProblem:
+      value:
+        type: 'urn:kavohub:problem:authentication-required'
+        title: Потрібна автентифікація
+        status: 401
+        detail: Надайте валідний bearer JWT.
+        instance: /api/v1/notifications
+    AccessDeniedProblem:
+      value:
+        type: 'urn:kavohub:problem:access-denied'
+        title: Доступ заборонено
+        status: 403
+        detail: Користувач не має доступу до цього ресурсу.
+        instance: /api/v1/notifications
+    NotificationNotFoundProblem:
+      value:
+        type: 'urn:kavohub:problem:notification-not-found'
+        title: Сповіщення не знайдено
+        status: 404
+        detail: Сповіщення з указаним ID не існує.
+        instance: /api/v1/notifications/a4b756a3-118a-4eae-8ef9-962f69fa7392
+    ReportNotFoundProblem:
+      value:
+        type: 'urn:kavohub:problem:report-not-found'
+        title: Звіт не знайдено
+        status: 404
+        detail: Знімок звіту для вказаного періоду ще не сформовано.
+        instance: /api/v1/reports/daily?date=2026-11-24
+    ValidationProblem:
+      value:
+        type: 'urn:kavohub:problem:validation-error'
+        title: Некоректний параметр
+        status: 422
+        detail: Перевірте значення параметрів запиту.
+        instance: /api/v1/notifications?page=0
+    RequestInProgress:
+      value:
+        type: 'urn:kavohub:problem:request-in-progress'
+        title: Запит уже виконується
+        status: 409
+        detail: Для цього сповіщення вже виконується цикл повторної доставки.
+        instance: /api/v1/notifications/a4b756a3-118a-4eae-8ef9-962f69fa7392/resend
+    RetryNotAllowed:
+      value:
+        type: 'urn:kavohub:problem:notification-retry-not-allowed'
+        title: Повтор недоступний
+        status: 409
+        detail: Повтор дозволений лише для сповіщення у стані final_failed.
+        instance: /api/v1/notifications/a4b756a3-118a-4eae-8ef9-962f69fa7392/resend
+    IdempotencyKeyReuse:
+      value:
+        type: 'urn:kavohub:problem:idempotency-key-reuse'
+        title: Ключ ідемпотентності вже використано
+        status: 422
+        detail: Цей Idempotency-Key уже використано з іншим тілом запиту.
+        instance: /api/v1/notifications/a4b756a3-118a-4eae-8ef9-962f69fa7392/resend
+    ServiceUnavailableProblem:
+      value:
+        type: 'urn:kavohub:problem:service-unavailable'
+        title: Сервіс тимчасово недоступний
+        status: 503
+        detail: Спробуйте повторити запит пізніше.
+        instance: /api/v1/notifications
+  schemas:
+    NotificationType:
+      type: string
+      enum:
+        - deal_won
+        - order_confirmed
+        - order_cancelled
+        - reserve_failed_customer
+        - reserve_failed_internal
+        - reserve_expired_customer
+        - reserve_expired_internal
+        - shipment_with_tracking
+        - delivery_status_changed
+        - invoice_after_dispatch
+        - payment_received
+        - discount_approval_requested
+        - discount_decision
+        - daily_summary
+        - inactive_renters_weekly
+        - it_final_failure
+    NotificationState:
+      type: string
+      enum: [waiting, pending, sending, retry_wait, sent, final_failed, suppressed]
+    DeliveryAttemptOutcome:
+      type: string
+      enum: [in_progress, success, transient_failure, permanent_failure]
+    DeliveryAttempt:
+      type: object
+      additionalProperties: false
+      required: [attemptNo, startedAt, finishedAt, outcome, errorCode]
+      properties:
+        attemptNo: { type: integer, minimum: 1 }
+        startedAt: { type: string, format: date-time, description: RFC 3339 UTC. }
+        finishedAt:
+          type: [string, 'null']
+          format: date-time
+          description: RFC 3339 UTC; null, якщо спроба ще триває.
+        outcome: { $ref: '#/components/schemas/DeliveryAttemptOutcome' }
+        errorCode: { type: [string, 'null'] }
+    NotificationRecipient:
+      type: object
+      additionalProperties: false
+      required: [id, emailMasked]
+      properties:
+        id: { type: string }
+        emailMasked: { type: string, example: 'm***@example.com' }
+    Notification:
+      type: object
+      additionalProperties: false
+      required: [id, notificationType, recipient, state, attemptCount, deliveryCycle, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        notificationType: { $ref: '#/components/schemas/NotificationType' }
+        recipient: { $ref: '#/components/schemas/NotificationRecipient' }
+        state: { $ref: '#/components/schemas/NotificationState' }
+        attemptCount: { type: integer, minimum: 0, description: Кількість спроб у поточному циклі. }
+        deliveryCycle: { type: integer, minimum: 1 }
+        nextActionAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time, description: RFC 3339 UTC. }
+        updatedAt: { type: string, format: date-time, description: RFC 3339 UTC. }
+        attempts:
+          type: array
+          items: { $ref: '#/components/schemas/DeliveryAttempt' }
+    NotificationPage:
+      type: object
+      additionalProperties: false
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Notification'
+              - type: object
+                properties:
+                  attempts: { type: array, maxItems: 0, items: { $ref: '#/components/schemas/DeliveryAttempt' } }
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, minimum: 0 }
+    Completeness:
+      type: object
+      additionalProperties: false
+      required: [status, missingSources, staleSources]
+      properties:
+        status: { type: string, enum: [complete, incomplete] }
+        missingSources:
+          type: array
+          items: { type: string }
+        staleSources:
+          type: array
+          items: { $ref: '#/components/schemas/StaleSource' }
+    StaleSource:
+      type: object
+      additionalProperties: false
+      required: [source, lastSyncAt]
+      properties:
+        source: { type: string }
+        lastSyncAt: { type: string, format: date-time, description: RFC 3339 UTC. }
+    DailyReport:
+      type: object
+      additionalProperties: false
+      required: [date, generatedAt, completeness, metrics]
+      properties:
+        date: { type: string, format: date }
+        generatedAt: { type: string, format: date-time, description: RFC 3339 UTC. }
+        completeness: { $ref: '#/components/schemas/Completeness' }
+        metrics:
+          type: object
+          additionalProperties: false
+          required: [ordersAccepted, shipmentsDispatched, outstandingDebt, currency]
+          properties:
+            ordersAccepted: { type: [integer, 'null'], minimum: 0 }
+            shipmentsDispatched: { type: [integer, 'null'], minimum: 0 }
+            outstandingDebt: { type: [number, 'null'], minimum: 0 }
+            currency: { type: string, pattern: '^[A-Z]{3}$', example: UAH }
+    InactiveRenter:
+      type: object
+      additionalProperties: false
+      required: [renterId, displayName, lastActivityAt]
+      properties:
+        renterId: { type: string }
+        displayName: { type: string }
+        lastActivityAt: { type: [string, 'null'], format: date-time }
+    InactiveRentersReport:
+      type: object
+      additionalProperties: false
+      required: [weekOf, generatedAt, completeness, items, total]
+      properties:
+        weekOf: { type: string, format: date, description: Понеділок звітного тижня. }
+        generatedAt: { type: string, format: date-time, description: RFC 3339 UTC. }
+        completeness: { $ref: '#/components/schemas/Completeness' }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/InactiveRenter' }
+        total: { type: integer, minimum: 0 }
+    Template:
+      type: object
+      additionalProperties: false
+      description: Метадані шаблону лише; тіло листа й секрети не повертаються.
+      required: [id, notificationType, name, locale, active, updatedAt]
+      properties:
+        id: { type: string }
+        notificationType: { $ref: '#/components/schemas/NotificationType' }
+        name: { type: string }
+        locale: { type: string, example: uk-UA }
+        active: { type: boolean }
+        updatedAt: { type: string, format: date-time, description: RFC 3339 UTC. }
+    ResendRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          pattern: '.*\S.*'
+    ResendAccepted:
+      type: object
+      additionalProperties: false
+      required: [notificationId, state, deliveryCycle, acceptedAt]
+      properties:
+        notificationId: { type: string, format: uuid }
+        state: { type: string, const: pending }
+        deliveryCycle: { type: integer, minimum: 1 }
+        acceptedAt: { type: string, format: date-time, description: RFC 3339 UTC. }
+    Problem:
+      type: object
+      description: RFC 9457 Problem Details.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          pattern: '^urn:kavohub:problem:.+'
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [name, reason]
+            properties:
+              name: { type: string }
+              reason: { type: string }

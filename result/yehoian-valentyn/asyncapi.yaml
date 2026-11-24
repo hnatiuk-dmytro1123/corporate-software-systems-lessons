@@ -1,0 +1,528 @@
+asyncapi: 3.0.0
+info:
+  title: KavoHub Notifications / Reporting Events
+  version: 1.0.0
+  description: >-
+    Контракт споживача Notifications / Reporting. Модуль отримує бізнес-події
+    з exchange kavohub.events та окремі DLQ-алерти за routing key dlq.alert.
+    Власних операцій send на спільній шині немає. Внутрішні notifications.*
+    залишаються записами журналу та метрик. Оброблені події дедуплікуються за
+    (source, id); повідомлення — за triggerOccurrenceId + recipientId +
+    notificationType. За замовчуванням triggerOccurrenceId = event.id; для
+    кількох відвантажень використовується UUIDv5 від event.id:shipmentId.
+    Ручний resend збільшує deliveryCycle, не змінюючи triggerOccurrenceId.
+    Основна черга споживача: notifications.events; черга повторів:
+    notifications.events.retry; DLQ: notifications.events.dlq; окрема черга
+    DLQ-алертів: notifications.dlq-alerts.
+    Після прийняття листа провайдером із втратою підтвердження спроба вважається
+    transient_failure; можливий дубль листа зафіксовано як припущення. Відкриті
+    питання: поштовий провайдер та підтримка ним ідемпотентності; подія
+    delivery_status_changed поза межами цієї версії контракту; узгодження
+    формату DLQ-алерту з власниками DLQ.
+servers:
+  rabbitmq:
+    host: localhost:5672
+    protocol: amqp
+    protocolVersion: 0-9-1
+    description: RabbitMQ; у production credentials задаються середовищем.
+defaultContentType: application/json
+channels:
+  crmDealWon:
+    address: crm.deal.won
+    title: CRM deal won
+    description: 'Routing key exchange kavohub.events. Черга споживача: notifications.events.'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: { name: kavohub.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    messages:
+      crmDealWonMessage: { $ref: '#/components/messages/CrmDealWon' }
+  ordersOrderConfirmed:
+    address: orders.order.confirmed
+    title: Order confirmed
+    description: Notifications чекає резерв до 15 хвилин від часу події; без резерву клієнтського листа немає.
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: { name: kavohub.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    messages:
+      orderConfirmedMessage: { $ref: '#/components/messages/OrderConfirmed' }
+  ordersOrderCancelled:
+    address: orders.order.cancelled
+    title: Order cancelled
+    description: 'Routing key exchange kavohub.events. Черга споживача: notifications.events.'
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: { name: kavohub.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    messages:
+      orderCancelledMessage: { $ref: '#/components/messages/OrderCancelled' }
+  inventoryStockReserved:
+    address: inventory.stock.reserved
+    title: Stock reserved
+    description: Оновлює репліку резерву та розблоковує очікуване підтвердження, якщо воно ще в межах 15 хв.
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: { name: kavohub.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    messages:
+      stockReservedMessage: { $ref: '#/components/messages/StockReserved' }
+  inventoryStockReservationFailed:
+    address: inventory.stock.reservation_failed
+    title: Stock reservation failed
+    description: Оновлює репліку невдалого резерву та скасовує таймер очікування підтвердженого замовлення; окремого алерту не створює.
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: { name: kavohub.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    messages:
+      reservationFailedMessage: { $ref: '#/components/messages/ReservationFailed' }
+  inventoryShipmentDispatched:
+    address: inventory.shipment.dispatched
+    title: Shipment dispatched
+    description: shipmentId обов'язковий; orderId є ключем кореляції з рахунком.
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: { name: kavohub.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    messages:
+      shipmentDispatchedMessage: { $ref: '#/components/messages/ShipmentDispatched' }
+  billingInvoiceIssued:
+    address: billing.invoice.issued
+    title: Invoice issued
+    description: orderId — ключ для очікування відвантаження; PDF недоступний — 3 повтори через 5 хв, далі final_failed та ІТ-алерт.
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: { name: kavohub.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    messages:
+      invoiceIssuedMessage: { $ref: '#/components/messages/InvoiceIssued' }
+  billingPaymentReceived:
+    address: billing.payment.received
+    title: Payment received
+    description: Оновлює дані звіту та надсилає лист менеджеру; клієнтська квитанція не надсилається.
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: { name: kavohub.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    messages:
+      paymentReceivedMessage: { $ref: '#/components/messages/PaymentReceived' }
+  dlqAlert:
+    address: dlq.alert
+    title: DLQ alert
+    description: >-
+      Окремий routing key для повідомлень-алертів, створених власниками DLQ.
+      Notifications читає виділену чергу notifications.dlq-alerts, а не DLQ інших модулів.
+    bindings:
+      amqp:
+        is: routingKey
+        exchange: { name: kavohub.events, type: topic, durable: true, autoDelete: false, vhost: / }
+        bindingVersion: 0.3.0
+    messages:
+      dlqAlertMessage: { $ref: '#/components/messages/DlqAlert' }
+
+operations:
+  receiveCrmDealWon:
+    action: receive
+    channel: { $ref: '#/channels/crmDealWon' }
+    messages: [{ $ref: '#/channels/crmDealWon/messages/crmDealWonMessage' }]
+    summary: Зберегти crm.deal.won і надіслати повідомлення ownerId.
+    description: >-
+      Стан угоди не ведеться. Owner береться з події; якщо ownerId відсутній,
+      повідомлення надсилається директору, а fallback фіксується в журналі.
+    bindings:
+      amqp: { ack: true, deliveryMode: 2, bindingVersion: 0.3.0 }
+  receiveOrderConfirmed:
+    action: receive
+    channel: { $ref: '#/channels/ordersOrderConfirmed' }
+    messages: [{ $ref: '#/channels/ordersOrderConfirmed/messages/orderConfirmedMessage' }]
+    summary: Запустити очікування резерву для підтвердженого замовлення.
+    description: Таймер рахується від time події; після 15 хв без резерву клієнтського листа немає й створюється ІТ-алерт, дедуплікований за orderId + version. Нижча order version ігнорується; однакова версія з іншим вмістом є порушенням контракту та йде в DLQ.
+    bindings:
+      amqp: { ack: true, deliveryMode: 2, bindingVersion: 0.3.0 }
+  receiveOrderCancelled:
+    action: receive
+    channel: { $ref: '#/channels/ordersOrderCancelled' }
+    messages: [{ $ref: '#/channels/ordersOrderCancelled/messages/orderCancelledMessage' }]
+    summary: Обробити скасування замовлення.
+    description: Клієнтці повідомляють, якщо підтвердження вже було доставлене; після відвантаження повідомляють менеджера замість клієнтки. Менеджер береться з репліки замовлення; якщо його немає, лист іде директору й fallback записується в журнал. Нижча order version ігнорується; однакова версія з іншим вмістом іде в DLQ.
+    bindings:
+      amqp: { ack: true, deliveryMode: 2, bindingVersion: 0.3.0 }
+  receiveStockReserved:
+    action: receive
+    channel: { $ref: '#/channels/inventoryStockReserved' }
+    messages: [{ $ref: '#/channels/inventoryStockReserved/messages/stockReservedMessage' }]
+    summary: Оновити репліку резерву.
+    description: Version резерву монотонна; менша версія ігнорується. Запізнілий резерв оновлює репліку, але не запускає клієнтське підтвердження після тайм-ауту. Однакова версія з іншим вмістом є порушенням контракту та йде в DLQ.
+    bindings:
+      amqp: { ack: true, deliveryMode: 2, bindingVersion: 0.3.0 }
+  receiveReservationFailed:
+    action: receive
+    channel: { $ref: '#/channels/inventoryStockReservationFailed' }
+    messages: [{ $ref: '#/channels/inventoryStockReservationFailed/messages/reservationFailedMessage' }]
+    summary: Оновити репліку невдалого резерву.
+    description: Скасовує 15-хвилинний таймер; ІТ-алерт у цьому сценарії не створюється. Нижча версія резерву ігнорується; однакова версія з іншим вмістом іде в DLQ.
+    bindings:
+      amqp: { ack: true, deliveryMode: 2, bindingVersion: 0.3.0 }
+  receiveShipmentDispatched:
+    action: receive
+    channel: { $ref: '#/channels/inventoryShipmentDispatched' }
+    messages: [{ $ref: '#/channels/inventoryShipmentDispatched/messages/shipmentDispatchedMessage' }]
+    summary: Надіслати клієнтці ТТН і перевірити очікуваний рахунок.
+    description: 'Для кількох відвантажень triggerOccurrenceId утворюється як UUIDv5 від рядка event.id:shipmentId.'
+    bindings:
+      amqp: { ack: true, deliveryMode: 2, bindingVersion: 0.3.0 }
+  receiveInvoiceIssued:
+    action: receive
+    channel: { $ref: '#/channels/billingInvoiceIssued' }
+    messages: [{ $ref: '#/channels/billingInvoiceIssued/messages/invoiceIssuedMessage' }]
+    summary: Надіслати PDF рахунку після відвантаження.
+    description: >-
+      Кореляція за orderId. Якщо рахунок надійшов раніше за відвантаження,
+      зберегти його в очікуванні. Для недоступного PDF зробити 3 повтори
+      з інтервалом 5 хвилин, потім перевести повідомлення у final_failed
+      та надіслати ІТ-алерт.
+    bindings:
+      amqp: { ack: true, deliveryMode: 2, bindingVersion: 0.3.0 }
+  receivePaymentReceived:
+    action: receive
+    channel: { $ref: '#/channels/billingPaymentReceived' }
+    messages: [{ $ref: '#/channels/billingPaymentReceived/messages/paymentReceivedMessage' }]
+    summary: Оновити звіт і повідомити менеджера про оплату.
+    description: Клієнтську квитанцію не надсилати; менеджера шукати у репліці замовлення, за відсутності — директор із записом fallback у журналі.
+    bindings:
+      amqp: { ack: true, deliveryMode: 2, bindingVersion: 0.3.0 }
+  receiveDlqAlert:
+    action: receive
+    channel: { $ref: '#/channels/dlqAlert' }
+    messages: [{ $ref: '#/channels/dlqAlert/messages/dlqAlertMessage' }]
+    summary: Надіслати ІТ лист про DLQ alert.
+    description: alertId стабільний на основі ID початкового повідомлення; ручний requeue збільшує incidentCycle. Повідомлення ІТ дедуплікується окремо для кожного incidentCycle.
+    bindings:
+      amqp: { ack: true, deliveryMode: 2, bindingVersion: 0.3.0 }
+
+components:
+  schemas:
+    EventEnvelope:
+      type: object
+      required: [specversion, id, type, source, time, correlationId, data]
+      properties:
+        specversion: { type: string, const: '1.0' }
+        id: { type: string, format: uuid, description: Унікальний ID події. }
+        type: { type: string }
+        source: { type: string, format: uri-reference }
+        time: { type: string, format: date-time }
+        correlationId: { type: string, format: uuid }
+        data: { type: object }
+    CrmDealWonData:
+      type: object
+      additionalProperties: false
+      required: [dealId, accountId, ownerId]
+      properties:
+        dealId: { type: string }
+        accountId: { type: string }
+        ownerId: { type: [string, 'null'], description: Якщо null, адресат — директор. }
+    OrderConfirmedData:
+      type: object
+      additionalProperties: false
+      required: [orderId, dealId, accountId, ownerId, version]
+      properties:
+        orderId: { type: string }
+        dealId: { type: string }
+        accountId: { type: string }
+        ownerId: { type: [string, 'null'], description: Відповідальний менеджер; null означає fallback на директора. }
+        version: { type: integer, minimum: 1, description: Версія агрегату замовлення. }
+    OrderCancelledData:
+      type: object
+      additionalProperties: false
+      required: [orderId, version]
+      properties:
+        orderId: { type: string }
+        version: { type: integer, minimum: 1, description: Версія агрегату замовлення. }
+        cancellationReason: { type: [string, 'null'] }
+    StockReservedData:
+      type: object
+      additionalProperties: false
+      required: [orderId, reservationId, version]
+      properties:
+        orderId: { type: string }
+        reservationId: { type: string }
+        version: { type: integer, minimum: 1, description: Монотонна версія агрегату резерву. }
+    ReservationFailedData:
+      type: object
+      additionalProperties: false
+      required: [orderId, version, reasonCode]
+      properties:
+        orderId: { type: string }
+        version: { type: integer, minimum: 1, description: Монотонна версія агрегату резерву. }
+        reasonCode: { type: string }
+    ShipmentDispatchedData:
+      type: object
+      additionalProperties: false
+      required: [orderId, shipmentId, trackingNumber, dispatchedAt]
+      properties:
+        orderId: { type: string }
+        shipmentId: { type: string, minLength: 1 }
+        trackingNumber: { type: string }
+        dispatchedAt: { type: string, format: date-time }
+    InvoiceIssuedData:
+      type: object
+      additionalProperties: false
+      required: [orderId, invoiceId, invoiceNumber]
+      properties:
+        orderId: { type: string, description: Спільний ключ кореляції з відвантаженням. }
+        invoiceId: { type: string }
+        invoiceNumber: { type: string }
+        pdfRef: { type: [string, 'null'], description: Посилання/ідентифікатор PDF; може бути тимчасово недоступним. }
+    PaymentReceivedData:
+      type: object
+      additionalProperties: false
+      required: [orderId, invoiceId, paymentId, amount, currency, paidAt]
+      properties:
+        orderId: { type: string }
+        invoiceId: { type: string }
+        paymentId: { type: string }
+        amount: { type: number, exclusiveMinimum: 0 }
+        currency: { type: string, pattern: '^[A-Z]{3}$' }
+        paidAt: { type: string, format: date-time }
+    DlqAlertData:
+      type: object
+      additionalProperties: false
+      required: [alertId, originalMessageId, originalSource, originalRoutingKey, reason, retryCount, incidentCycle]
+      properties:
+        alertId: { type: string, description: Стабільний ID, похідний від ID початкового повідомлення. }
+        originalMessageId: { type: string, format: uuid }
+        originalSource: { type: string, format: uri-reference }
+        originalRoutingKey: { type: string }
+        reason: { type: string }
+        retryCount: { type: integer, minimum: 0 }
+        incidentCycle: { type: integer, minimum: 1, description: Збільшується при ручному requeue. }
+    CrmDealWonEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: crm.deal.won }
+            data: { $ref: '#/components/schemas/CrmDealWonData' }
+    OrderConfirmedEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: orders.order.confirmed }
+            data: { $ref: '#/components/schemas/OrderConfirmedData' }
+    OrderCancelledEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: orders.order.cancelled }
+            data: { $ref: '#/components/schemas/OrderCancelledData' }
+    StockReservedEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: inventory.stock.reserved }
+            data: { $ref: '#/components/schemas/StockReservedData' }
+    ReservationFailedEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: inventory.stock.reservation_failed }
+            data: { $ref: '#/components/schemas/ReservationFailedData' }
+    ShipmentDispatchedEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: inventory.shipment.dispatched }
+            data: { $ref: '#/components/schemas/ShipmentDispatchedData' }
+    InvoiceIssuedEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: billing.invoice.issued }
+            data: { $ref: '#/components/schemas/InvoiceIssuedData' }
+    PaymentReceivedEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: billing.payment.received }
+            data: { $ref: '#/components/schemas/PaymentReceivedData' }
+    DlqAlertEvent:
+      description: >-
+        correlationId копіюється з початкового повідомлення. Ключ дедуплікації
+        ІТ-сповіщення — alertId + incidentCycle.
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: dlq.alert }
+            data: { $ref: '#/components/schemas/DlqAlertData' }
+
+  messages:
+    CrmDealWon:
+      name: CrmDealWon
+      title: CRM deal won
+      contentType: application/json
+      payload: { $ref: '#/components/schemas/CrmDealWonEvent' }
+      examples:
+        - name: dealWon
+          summary: Виграна угода з відповідальним менеджером
+          payload:
+            specversion: '1.0'
+            id: 17b1b6ef-bd3b-4b9a-9e78-8f965f11f0e2
+            type: crm.deal.won
+            source: urn:kavohub:crm
+            time: '2026-11-24T10:15:00Z'
+            correlationId: 72eab454-134e-4f7f-a14e-f4f8e31e77f2
+            data: { dealId: deal-104, accountId: account-87, ownerId: user-12 }
+    OrderConfirmed:
+      name: OrderConfirmed
+      title: Order confirmed
+      contentType: application/json
+      payload: { $ref: '#/components/schemas/OrderConfirmedEvent' }
+      examples:
+        - name: confirmed
+          payload:
+            specversion: '1.0'
+            id: 3cdb322a-03a1-43ed-b1b6-4a67b972ce80
+            type: orders.order.confirmed
+            source: urn:kavohub:orders
+            time: '2026-11-24T10:20:00Z'
+            correlationId: 72eab454-134e-4f7f-a14e-f4f8e31e77f2
+            data: { orderId: ORD-2026-000104, dealId: deal-104, accountId: account-87, ownerId: user-12, version: 4 }
+    OrderCancelled:
+      name: OrderCancelled
+      title: Order cancelled
+      contentType: application/json
+      payload: { $ref: '#/components/schemas/OrderCancelledEvent' }
+      examples:
+        - name: cancelled
+          payload:
+            specversion: '1.0'
+            id: ecfd73b8-a587-4b47-a992-860cc02656a0
+            type: orders.order.cancelled
+            source: urn:kavohub:orders
+            time: '2026-11-24T10:25:00Z'
+            correlationId: 72eab454-134e-4f7f-a14e-f4f8e31e77f2
+            data: { orderId: ORD-2026-000104, version: 5, cancellationReason: customer_request }
+    StockReserved:
+      name: StockReserved
+      title: Stock reserved
+      contentType: application/json
+      payload: { $ref: '#/components/schemas/StockReservedEvent' }
+      examples:
+        - name: reserved
+          payload:
+            specversion: '1.0'
+            id: b4bd778b-6fd7-4bcb-8a06-353245ad2981
+            type: inventory.stock.reserved
+            source: urn:kavohub:inventory
+            time: '2026-11-24T10:21:30Z'
+            correlationId: 72eab454-134e-4f7f-a14e-f4f8e31e77f2
+            data: { orderId: ORD-2026-000104, reservationId: RSV-411, version: 2 }
+    ReservationFailed:
+      name: ReservationFailed
+      title: Stock reservation failed
+      contentType: application/json
+      payload: { $ref: '#/components/schemas/ReservationFailedEvent' }
+      examples:
+        - name: failed
+          payload:
+            specversion: '1.0'
+            id: 72468486-ef87-4c9a-9d8e-7d58bfbebd05
+            type: inventory.stock.reservation_failed
+            source: urn:kavohub:inventory
+            time: '2026-11-24T10:21:30Z'
+            correlationId: 72eab454-134e-4f7f-a14e-f4f8e31e77f2
+            data: { orderId: ORD-2026-000105, version: 2, reasonCode: insufficient_stock }
+    ShipmentDispatched:
+      name: ShipmentDispatched
+      title: Shipment dispatched
+      contentType: application/json
+      payload: { $ref: '#/components/schemas/ShipmentDispatchedEvent' }
+      examples:
+        - name: dispatched
+          payload:
+            specversion: '1.0'
+            id: 630fe40f-d465-4698-952d-6408433fd78e
+            type: inventory.shipment.dispatched
+            source: urn:kavohub:inventory
+            time: '2026-11-24T11:00:00Z'
+            correlationId: 72eab454-134e-4f7f-a14e-f4f8e31e77f2
+            data:
+              orderId: ORD-2026-000104
+              shipmentId: SHP-551
+              trackingNumber: '20450000123456'
+              dispatchedAt: '2026-11-24T11:00:00Z'
+    InvoiceIssued:
+      name: InvoiceIssued
+      title: Invoice issued
+      contentType: application/json
+      payload: { $ref: '#/components/schemas/InvoiceIssuedEvent' }
+      examples:
+        - name: invoiceIssued
+          payload:
+            specversion: '1.0'
+            id: e7938003-1646-46cc-9f22-c841a9638438
+            type: billing.invoice.issued
+            source: urn:kavohub:billing
+            time: '2026-11-24T10:55:00Z'
+            correlationId: 72eab454-134e-4f7f-a14e-f4f8e31e77f2
+            data: { orderId: ORD-2026-000104, invoiceId: INV-990, invoiceNumber: INV/2026/00990, pdfRef: odoo:account.move:990 }
+    PaymentReceived:
+      name: PaymentReceived
+      title: Payment received
+      contentType: application/json
+      payload: { $ref: '#/components/schemas/PaymentReceivedEvent' }
+      examples:
+        - name: paymentReceived
+          payload:
+            specversion: '1.0'
+            id: ed79857a-941a-4e13-bae5-55f44e459bac
+            type: billing.payment.received
+            source: urn:kavohub:billing
+            time: '2026-11-24T13:05:00Z'
+            correlationId: 72eab454-134e-4f7f-a14e-f4f8e31e77f2
+            data:
+              orderId: ORD-2026-000104
+              invoiceId: INV-990
+              paymentId: PAY-671
+              amount: 12450.00
+              currency: UAH
+              paidAt: '2026-11-24T13:04:30Z'
+    DlqAlert:
+      name: DlqAlert
+      title: Dead-letter alert
+      contentType: application/json
+      payload: { $ref: '#/components/schemas/DlqAlertEvent' }
+      examples:
+        - name: firstIncidentCycle
+          payload:
+            specversion: '1.0'
+            id: 88088ec7-f1aa-4ba5-bb72-b5ed4df4df96
+            type: dlq.alert
+            source: urn:kavohub:dlq-alerts
+            time: '2026-11-24T13:10:00Z'
+            correlationId: 72eab454-134e-4f7f-a14e-f4f8e31e77f2
+            data:
+              alertId: 4cc02a9a-5ef3-4c7b-9d6a-f17a3fa6ca4b
+              originalMessageId: 4cc02a9a-5ef3-4c7b-9d6a-f17a3fa6ca4b
+              originalSource: urn:kavohub:inventory
+              originalRoutingKey: inventory.stock.reserved
+              reason: retry_limit_exceeded
+              retryCount: 5
+              incidentCycle: 1
